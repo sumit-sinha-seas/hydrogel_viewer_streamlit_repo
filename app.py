@@ -270,7 +270,7 @@ def get_target_rgb8_for_gid(gid: int, df: pd.DataFrame, H_img, gid_to_i, x_um, y
 
 def main():
     st.set_page_config(page_title="Hydrogel Viewer", layout="wide")
-    st.title("Hydrogel instruction viewer (no PDE; precomputed bundle)")
+    st.title("Hydrogel instruction viewer")
 
     repo_root = Path(".")
 
