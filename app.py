@@ -9,6 +9,10 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from PIL import Image
 
+# =========================================================
+# Hydrogel Viewer (Streamlit)
+# =========================================================
+
 DEFAULT_BUNDLE_DIR = Path("viewer_bundle_iterated")
 
 # Match Colab viewer
@@ -169,12 +173,38 @@ def maybe_unpack_uploaded_zip(upload) -> Path:
     with zipfile.ZipFile(zpath, "r") as zf:
         zf.extractall(tmp)
 
+    # If zip contains a folder viewer_bundle/, use it, else use tmp root
     if (tmp / "viewer_bundle" / "meta.json").exists():
         return tmp / "viewer_bundle"
     return tmp
 
 
-# ---- Robust coord column pick: avoid y_um vs Y_uM collision ----
+def discover_local_bundles(repo_root: Path) -> list[Path]:
+    """
+    Detect local bundle directories:
+      - viewer_bundle_iterated/
+      - viewer_bundle_non_iterated/
+      - viewer_bundle/
+    Only keep dirs that contain meta.json.
+    """
+    candidates = []
+    for p in repo_root.glob("viewer_bundle*"):
+        if p.is_dir() and (p / "meta.json").exists():
+            candidates.append(p)
+
+    # Sort with nice preference: iterated first, then non_iterated, then plain
+    def key(p: Path):
+        name = p.name.lower()
+        if "iterated" in name:
+            return (0, name)
+        if "non_iterated" in name or "noniterated" in name:
+            return (1, name)
+        return (2, name)
+
+    candidates = sorted(candidates, key=key)
+    return candidates
+
+
 def _col_exact(df: pd.DataFrame, name: str):
     name = name.strip()
     for c in df.columns:
@@ -190,7 +220,7 @@ def _pick_coord_col(df: pd.DataFrame, which: str):
     if c is not None:
         return c
 
-    # case-insensitive exact, BUT reject any column containing 'uM' (capital M)
+    # case-insensitive exact, but reject any column containing 'uM' (capital M)
     target = f"{which}_um".lower()
     for c in df.columns:
         cs = str(c).strip()
@@ -203,7 +233,6 @@ def _pick_um_col(df: pd.DataFrame, ch: str):
     c = _col_exact(df, f"{ch}_uM")
     if c is not None:
         return c
-    # case-insensitive exact match
     want = f"{ch.lower()}_um"
     for col in df.columns:
         if str(col).strip().lower() == want:
@@ -223,7 +252,7 @@ def get_target_rgb8_for_gid(gid: int, df: pd.DataFrame, H_img, gid_to_i, x_um, y
             b8 = int(row.iloc[0]["target_B8"])
             return np.array([r8, g8, b8], dtype=int), "from table"
 
-    # fallback: sample from target image at gel pixel
+    # fallback: sample from target image
     if gid not in gid_to_i:
         raise KeyError(f"GelIndex {gid} not found")
     i = gid_to_i[gid]
@@ -241,36 +270,65 @@ def get_target_rgb8_for_gid(gid: int, df: pd.DataFrame, H_img, gid_to_i, x_um, y
 
 def main():
     st.set_page_config(page_title="Hydrogel Viewer", layout="wide")
-    st.title("Hydrogel instruction viewer")
+    st.title("Hydrogel instruction viewer (no PDE; precomputed bundle)")
+
+    repo_root = Path(".")
 
     with st.sidebar:
-        st.header("Bundle")
-        use_uploaded = st.toggle("Upload bundle .zip instead of repo viewer_bundle/", value=False)
+        st.header("Bundle source")
+
+        use_uploaded = st.toggle("Upload bundle .zip", value=False)
         upload = None
+
+        bundle_dir = None
+
         if use_uploaded:
             upload = st.file_uploader("Upload bundle.zip", type=["zip"], accept_multiple_files=False)
+            if upload is None:
+                st.info("Upload a bundle.zip above.")
+                st.stop()
+
+            # Unpack zip, then possibly let user choose inside it if multiple bundles exist
+            base_dir = maybe_unpack_uploaded_zip(upload)
+            found = discover_local_bundles(base_dir)
+            if len(found) >= 2:
+                bundle_name = st.selectbox(
+                    "Choose bundle inside uploaded zip",
+                    options=[p.name for p in found],
+                    index=0
+                )
+                bundle_dir = next(p for p in found if p.name == bundle_name)
+            else:
+                bundle_dir = base_dir
+
+        else:
+            local = discover_local_bundles(repo_root)
+            if len(local) >= 2:
+                bundle_name = st.selectbox(
+                    "Choose local bundle",
+                    options=[p.name for p in local],
+                    index=0  # iterated tends to come first due to sorting
+                )
+                bundle_dir = next(p for p in local if p.name == bundle_name)
+            elif len(local) == 1:
+                bundle_dir = local[0]
+                st.caption(f"Using bundle: `{bundle_dir.name}`")
+            else:
+                # fallback
+                bundle_dir = DEFAULT_BUNDLE_DIR
+                st.caption(f"Using fallback: `{bundle_dir}`")
+
         st.divider()
         show_debug = st.toggle("Show debug", value=False)
 
-    # Load bundle
+    # Load selected bundle
     try:
-        if use_uploaded:
-            if upload is None:
-                st.info("Upload a bundle.zip in the sidebar.")
-                st.stop()
-            bundle_dir = maybe_unpack_uploaded_zip(upload)
-        else:
-            bundle_dir = DEFAULT_BUNDLE_DIR
-
         meta, P_np, H_img, df = load_bundle_from_dir(bundle_dir)
     except Exception as e:
         st.error(str(e))
+        st.write("Expected bundle files in selected folder:")
         st.code(
-            "viewer_bundle/\n"
-            "  meta.json\n"
-            "  P_np.npy\n"
-            "  H_img.npy  (or H_u8.png)\n"
-            "  instructions_table.csv\n"
+            "meta.json\nP_np.npy\nH_img.npy (or H_u8.png)\ninstructions_table.csv\n"
         )
         st.stop()
 
@@ -281,7 +339,7 @@ def main():
     TEMPLATE_MIN_uM = float(meta.get("TEMPLATE_MIN_uM", 0.01))
     RGB_THR = int(meta.get("RGB_THR", 100))
 
-    # Safety: match P shape
+    # Shapes
     if P_np.shape[:2] != (H, W) or P_np.shape[-1] != 3:
         st.error(f"P_np has shape {P_np.shape}, expected (H,W,3)=({H},{W},3)")
         st.stop()
@@ -301,7 +359,7 @@ def main():
         missing.append("x_um")
     if ycol is None:
         missing.append("y_um")
-    for name, col in zip(["R_uM","G_uM","B_uM","C_uM","M_uM","Y_uM"], ucols):
+    for name, col in zip(["R_uM", "G_uM", "B_uM", "C_uM", "M_uM", "Y_uM"], ucols):
         if col is None:
             missing.append(name)
 
@@ -310,7 +368,7 @@ def main():
         st.write("Detected columns:", list(df.columns))
         st.stop()
 
-    # canonical GelIndex
+    # Canonical GelIndex
     df["GelIndex"] = pd.to_numeric(df[gelcol], errors="coerce").astype("Int64")
     df = df.dropna(subset=["GelIndex"]).copy()
     df["GelIndex"] = df["GelIndex"].astype(int)
@@ -324,14 +382,16 @@ def main():
     gid_list = sorted(gid_to_i.keys())
 
     with st.sidebar:
+        st.header("Viewer controls")
         gid = st.selectbox("GelIndex", options=gid_list, index=0)
         zoom = st.slider("Zoom (pixels)", min_value=4, max_value=40, value=12, step=2)
+        st.caption(f"Bundle: `{bundle_dir.name}`")
         st.caption(f"Viewer RGB_THR={RGB_THR}")
         st.caption(f"OFF_uM={TEMPLATE_MIN_uM}  (bits ON if uM > OFF+{TOL_uM:g})")
 
         if show_debug:
-            st.write("xcol:", xcol, " ycol:", ycol)
-            st.write("first y:", y_um[:8].tolist())
+            st.write("bundle_dir:", str(bundle_dir))
+            st.write("xcol:", xcol, "ycol:", ycol)
             st.write("y min/max:", float(np.min(y_um)), float(np.max(y_um)))
 
     gid = int(gid)
@@ -340,7 +400,6 @@ def main():
     y = float(y_um[i])
     ix, iy = pix_from_xy_um(x, y, L_PHYS_UM, W, H)
 
-    # EXACT Colab bits
     bits6_from_uM = uM_to_bits6(u6[i, :], off_uM=TEMPLATE_MIN_uM, tol=TOL_uM)
     bits6_str = "".join(str(int(b)) for b in bits6_from_uM)
 
@@ -348,9 +407,10 @@ def main():
     rgb8_thr = threshold_rgb8(rgb8, thr=RGB_THR)
     rgb_bits = rgb8_presence_bits(rgb8_thr)
 
-    # EXACT Colab rule
-    bits6_rule = rgb8_to_bits6_binary_cmy_v2(int(rgb8[0]), int(rgb8[1]), int(rgb8[2]), thr=RGB_THR,
-                                             res_thr_abs=20, res_thr_rel=0.15)
+    bits6_rule = rgb8_to_bits6_binary_cmy_v2(
+        int(rgb8[0]), int(rgb8[1]), int(rgb8[2]),
+        thr=RGB_THR, res_thr_abs=20, res_thr_rel=0.15
+    )
     match = bool(np.all(bits6_rule == bits6_from_uM))
 
     sim_rgb01 = np.asarray(P_np)[iy, ix, :]
@@ -412,6 +472,7 @@ def main():
     st.subheader("Details")
 
     details_html = (
+        f"**Bundle:** `{bundle_dir.name}`<br><br>"
         f"**GelIndex:** {gid}<br><br>"
         f"**Position (µm):** ({x:.2f}, {y:.2f}) &nbsp;&nbsp; "
         f"**Pixel:** (ix={ix}, iy={iy})<br><br>"
