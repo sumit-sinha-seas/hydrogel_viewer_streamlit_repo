@@ -53,7 +53,7 @@ def rgb8_presence_bits(rgb8_thr):
     return np.array([int(rT > 0), int(gT > 0), int(bT > 0)], dtype=int)
 
 
-def rgb8_to_bits6_binary_cmy_v2(r8, g8, b8, thr=100, res_thr_abs=20, res_thr_rel=0.15):
+def rgb8_to_bits6_binary_cmy_v2(r8, g8, b8, thr=100, res_thr_abs=50):
     """
     EXACT Colab rule (two-stage with residual tests).
     bits = [R,G,B,C,M,Y]
@@ -79,7 +79,7 @@ def rgb8_to_bits6_binary_cmy_v2(r8, g8, b8, thr=100, res_thr_abs=20, res_thr_rel
         return bits
 
     def keep_primary(residual, ref):
-        return (residual >= res_thr_abs) or (residual >= res_thr_rel * max(ref, 1))
+        return (residual >= res_thr_abs)
 
     # n == 2
     if n == 2:
@@ -409,7 +409,7 @@ def main():
 
     bits6_rule = rgb8_to_bits6_binary_cmy_v2(
         int(rgb8[0]), int(rgb8[1]), int(rgb8[2]),
-        thr=RGB_THR, res_thr_abs=20, res_thr_rel=0.15
+        thr=RGB_THR, res_thr_abs=50
     )
     match = bool(np.all(bits6_rule == bits6_from_uM))
 
